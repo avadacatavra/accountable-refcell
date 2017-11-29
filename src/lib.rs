@@ -6,6 +6,7 @@ extern crate backtrace;
 
 use backtrace::Backtrace;
 use std::cell::{Cell, RefCell as StdRefCell, Ref as StdRef, RefMut as StdRefMut};
+use std::cell::{BorrowError, BorrowMutError};
 use std::env;
 use std::fmt::{Display, Debug, Formatter, Error};
 use std::ops::{Deref, DerefMut};
@@ -15,6 +16,32 @@ pub struct RefCell<T: ?Sized> {
     borrows: StdRefCell<Vec<BorrowRecord>>,
     next_id: Cell<usize>,
     inner: StdRefCell<T>,
+}
+
+impl<T: ?Sized + Debug> Debug for RefCell<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
+        self.inner.fmt(f)
+    }
+}
+
+impl<T: ?Sized + PartialEq> PartialEq for RefCell<T> {
+    fn eq(&self, other: &RefCell<T>) -> bool {
+        *self.borrow() == *other.borrow()
+    }
+}
+
+impl<T: Default> Default for RefCell<T> {
+    #[inline]
+    fn default() -> RefCell<T> {
+        RefCell::new(Default::default())
+    }
+}
+
+impl<T: Clone> Clone for RefCell<T> {
+    #[inline]
+    fn clone(&self) -> RefCell<T> {
+        RefCell::new(self.borrow().clone())
+    }
 }
 
 struct BorrowRecord {
@@ -54,6 +81,30 @@ impl<'a, T: ?Sized> Ref<'a, T> {
             inner: StdRef::clone(&orig.inner),
             cell: orig.cell,
             id: id,
+        }
+    }
+
+    #[inline]
+    pub fn map<U: ?Sized, F>(orig: Ref<'a, T>, f: F) -> Ref<'a, U>
+        where F: FnOnce(&T) -> &U
+    {
+        Ref {
+            inner: f(&orig.inner),
+            cell: orig.cell,
+            id: orig.id,
+        }
+    }
+}
+
+impl<'a, T: ?Sized> RefMut<'a, T> {
+    #[inline]
+    pub fn map<U: ?Sized, F>(orig: RefMut<'a, T>, f: F) -> RefMut<'a, U>
+        where F: FnOnce(&T) -> &U
+    {
+        RefMut {
+            inner: f(&orig.inner),
+            cell: orig.cell,
+            id: orig.id,
         }
     }
 }
@@ -137,18 +188,16 @@ impl<T: ?Sized> RefCell<T> {
     /// Borrow the value stored in this cell immutably. Panics if any outstanding mutable
     /// borrows of the same cell exist.
     pub fn borrow(&self) -> Ref<T> {
-        if let Ok(r) = self.inner.try_borrow() {
-            let id = self.record();
-            Ref {
-                inner: r,
-                cell: self,
-                id: id,
-            }
+        if let Ok(value) = self.try_borrow() {
+            value
         } else {
             if let Ok(var) = env::var("RUST_BACKTRACE") {
                 if !var.is_empty() {
-                    eprintln!("Outstanding borrow:");
-                    print_filtered_backtrace(&self.borrows.borrow()[0].backtrace);
+                    eprintln!("Outstanding borrows:");
+                    for borrow in &*self.borrows.borrow() {
+                        print_filtered_backtrace(&borrow.backtrace);
+                        eprintln!("");
+                    }
                 }
             }
             panic!("RefCell is already mutably borrowed.");
@@ -158,13 +207,8 @@ impl<T: ?Sized> RefCell<T> {
     /// Borrow the value stored in this cell mutably. Panics if any outstanding immutable
     /// borrows of the same cell exist.
     pub fn borrow_mut(&self) -> RefMut<T> {
-        if let Ok(r) = self.inner.try_borrow_mut() {
-            let id = self.record();
-            RefMut {
-                inner: r,
-                cell: self,
-                id: id,
-            }
+        if let Ok(value) = self.try_borrow_mut() {
+            value
         } else {
             if let Ok(var) = env::var("RUST_BACKTRACE") {
                 if !var.is_empty() {
@@ -178,6 +222,46 @@ impl<T: ?Sized> RefCell<T> {
             panic!("RefCell is already immutably borrowed.");
         }
     }
+
+    pub fn try_borrow_mut(&self) -> Result<RefMut<T>, BorrowMutError> {
+        match self.inner.try_borrow_mut() {
+            Ok(r) => {
+                let id = self.record();
+                Ok(RefMut {
+                    inner: r,
+                    cell: self,
+                    id: id,
+                })}
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn try_borrow(&self) -> Result<Ref<T>, BorrowError> {
+        match self.inner.try_borrow() {
+            Ok(r) => {
+                let id = self.record();
+                Ok(Ref {
+                    inner: r,
+                    cell: self,
+                    id: id,
+                })}
+            Err(e) => Err(e)
+        }
+    }
+
+    /// Returns a raw pointer to the underlying data in this cell
+    pub fn as_ptr(&self) -> *mut T {
+        self.inner.as_ptr()
+    }
+
+    /// Returns a mutable reference to the underlying data
+    /// 
+    /// Please be aware that this method is only for special circumstances and is usually
+    /// not what you want. In case of doubt, use [`borrow_mut`] instead
+    pub fn get_mut(&mut self) -> &mut T {
+        self.inner.get_mut()
+    }
+
 }
 
 /// Print a backtrace without any frames from the backtrace library.
