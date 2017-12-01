@@ -6,6 +6,7 @@ extern crate backtrace;
 
 use backtrace::Backtrace;
 use std::cell::{Cell, RefCell as StdRefCell, Ref as StdRef, RefMut as StdRefMut};
+use std::iter::Iterator;
 use std::cell::{BorrowError, BorrowMutError};
 use std::env;
 use std::fmt::{Display, Debug, Formatter, Error};
@@ -85,29 +86,37 @@ impl<'a, T: ?Sized> Ref<'a, T> {
     }
 
     #[inline]
-    pub fn map<U: ?Sized, F>(orig: Ref<'a, T>, f: F) -> Ref<'a, U>
-        where F: FnOnce(&T) -> &U
+    pub fn map<U: ?Sized, F>(orig: Ref<'a, T>, f: F) -> Ref<'a, U> where
+        U: std::marker::Sized,
+        T: Iterator,
+        F: FnOnce(&T) -> &U
     {
+        // let t = orig.deref();
+        let id = orig.cell.record();
+        let inner = StdRef::clone(&orig.inner);
+        let mapped = StdRef::map(inner, f);
+        let mapped_cell = RefCell::new(*mapped.deref());
         Ref {
-            inner: f(&orig.inner),
-            cell: orig.cell,
-            id: orig.id,
+            inner: StdRef::clone(&mapped),
+            cell: &mapped_cell,
+            id: id 
         }
     }
 }
 
-impl<'a, T: ?Sized> RefMut<'a, T> {
-    #[inline]
-    pub fn map<U: ?Sized, F>(orig: RefMut<'a, T>, f: F) -> RefMut<'a, U>
-        where F: FnOnce(&T) -> &U
-    {
-        RefMut {
-            inner: f(&orig.inner),
-            cell: orig.cell,
-            id: orig.id,
-        }
-    }
-}
+// impl<'a, T: ?Sized> RefMut<'a, T> {
+//     #[inline]
+//     pub fn map<U: ?Sized, F>(orig: RefMut<'a, T>, f: F) -> RefMut<'a, U> where
+//         T: Iterator,
+//         F: FnOnce(&T) -> &U
+//     {
+//         RefMut {
+//             inner: StdRefMut::map(orig.inner, f),
+//             cell: orig.cell,
+//             id: orig.id 
+//         }
+//     }
+// }
 
 impl<'a, T: ?Sized + Display> Display for Ref<'a, T> {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
